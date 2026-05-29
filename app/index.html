@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KB Q&A Bot 知識庫問答助手</title>
+    <div id="kb-summary-box" style="background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 10px 15px; margin-bottom: 20px; text-align: center; color: #495057; font-size: 14px;">
+        📊 知識庫狀態：<span id="summary-text" style="font-weight: bold; color: #1a73e8;">正在載入大腦狀態...</span>
+    </div>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; background-color: #f5f7f8; color: #333; }
+        h1 { color: #1a73e8; text-align: center; }
+        .input-container { display: flex; gap: 10px; margin-bottom: 30px; }
+        input[type="text"] { flex: 1; padding: 12px; border: 1px solid #ccc; border-radius: 8px; font-size: 16px; }
+        button { padding: 12px 24px; background-color: #1a73e8; color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; font-weight: bold; }
+        button:hover { background-color: #1557b0; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); margin-bottom: 20px; display: none; }
+        .card h2 { margin-top: 0; font-size: 18px; border-bottom: 2px solid #eee; padding-bottom: 8px; }
+        #sources-card h2 { color: #e67e22; }
+        #answer-card h2 { color: #2ecc71; }
+        .source-item { background: #fdf6f0; border-left: 4px solid #e67e22; padding: 10px; margin-bottom: 10px; border-radius: 0 4px 4px 0; font-size: 14px; }
+        .source-meta { font-weight: bold; color: #d35400; margin-bottom: 5px; }
+        .answer-content { font-size: 16px; line-height: 1.6; white-space: pre-line; }
+        .loading { text-align: center; color: #666; font-style: italic; display: none; margin-top: 20px; }
+    </style>
+</head>
+<body>
+
+    <h1> 知識庫問答助手 </h1>
+    <div id="rewrite-display" style="display:none; color: #666; font-size: 13px; margin-bottom: 10px; background: #e8f0fe; padding: 5px 10px; border-radius: 4px; border-left: 4px solid #1a73e8;">
+        🔍 系統意圖解析：將口語轉譯為核心關鍵字 ➔ <strong id="rewrite-text" style="color:#1a73e8;"></strong>
+    </div>
+    
+    <div class="input-container">
+        <input type="text" id="query-input" placeholder="請輸入您的問題...（例如：要怎麼降低交易風險？）" onkeydown="if(event.key==='Enter') sendQuery()">
+        <button id="send-btn" onclick="sendQuery()">發問</button>
+    </div>
+
+    <div id="loading" class="loading">⏳ 系統正在檢索知識庫並生成回答中，請稍候...</div>
+
+    <div id="sources-card" class="card">
+        <h2>📌 檢索參考來源 (Sources)</h2>
+        <div id="sources-container"></div>
+    </div>
+
+    <div id="answer-card" class="card">
+        <h2>💬 AI 客服回答 (Answer)</h2>
+        <div id="answer-container" class="answer-content"></div>
+    </div>
+
+    <script>
+        // 當作全網頁共用的「全局變數」 
+        let conversationHistory = [];
+        async function sendQuery() {
+            const inputEl = document.getElementById('query-input');
+            const btnEl = document.getElementById('send-btn');
+            const loadingEl = document.getElementById('loading');
+            const sourcesCard = document.getElementById('sources-card');
+            const answerCard = document.getElementById('answer-card');
+            const sourcesContainer = document.getElementById('sources-container');
+            const answerContainer = document.getElementById('answer-container');
+
+            const query = inputEl.value.trim();
+            if (!query) return;
+
+            // 進入載入狀態
+            inputEl.disabled = true;
+            btnEl.disabled = true;
+            loadingEl.style.display = 'block';
+            sourcesCard.style.display = 'none';
+            answerCard.style.display = 'none';
+            document.getElementById('rewrite-display').style.display = 'none'; // 先隱藏重寫區
+            sourcesContainer.innerHTML = '';
+            answerContainer.innerHTML = ''; // 清空打字機區
+
+            let currentEventName = ''; // 用來記錄當下抓到的 SSE 事件類型
+            let accumulatedAnswer = ''; // 用來累積 AI 的打字機回答
+
+            try {
+                // 🚀 改打全新的串流端點 /chat/stream
+                const response = await fetch('/chat/stream', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        query: query,
+                        history: conversationHistory
+                    })
+                });
+
+                if (!response.ok) throw new Error('串流連線失敗');
+
+                // 🌟 開啟瀏覽器的高級串流解碼管線
+                const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    // SSE 的封包會包含多行，例如:
+                    // event: token
+                    // data: 的
+                    const lines = value.split('\n');
+                    for (let line of lines) {
+                        line = line.trim();
+                        if (!line) continue;
+
+                        if (line.startsWith('event:')) {
+                            currentEventName = line.replace('event:', '').trim();
+                        } else if (line.startsWith('data:')) {
+                            const dataContent = line.replace('data:', '').trim();
+
+                            // 🎵 三部曲核心解析邏輯
+                            if (currentEventName === 'source') {
+                                // 第一步：收到來源，在答案跳出來前先瞬間畫好橘色儀表板卡片
+                                const payload = JSON.parse(dataContent);
+                                
+                                // 展示高科技意圖解析區
+                                if (payload.rewritten_query) {
+                                    document.getElementById('rewrite-display').style.display = 'block';
+                                    document.getElementById('rewrite-text').innerText = `「${payload.rewritten_query}」`;
+                                }
+
+                                if (payload.sources && payload.sources.length > 0) {
+                                    payload.sources.forEach(src => {
+                                        const div = document.createElement('div');
+                                        div.className = 'source-item';
+                                        div.innerHTML = `
+                                            <div class="source-meta" style="font-size:15px; border-bottom: 1px dashed #e67e22; padding-bottom:5px; margin-bottom:8px;">
+                                                📄 來源: <strong>${src.source}</strong> | 標題: <strong>${src.heading}</strong>
+                                            </div>
+                                            <div style="display:flex; gap:15px; font-size:13px; background:#fff; padding:8px; border-radius:6px; margin-bottom:8px; color:#555; border:1px solid #eee;">
+                                                <div>🔮 <strong>RRF 融合總分:</strong> <span style="color:#e67e22; font-weight:bold;">${src.score}</span></div>
+                                                <div>📐 <strong>FAISS 向量距離:</strong> <span style="color:#1a73e8;">${src.vector_score}</span> (名次: ${src.vector_rank})</div>
+                                                <div>🔍 <strong>BM25 關鍵字得分:</strong> <span style="color:#2ecc71;">${src.bm25_score}</span> (名次: ${src.bm25_rank})</div>
+                                            </div>
+                                            <div style="color:#222; line-height:1.5;">${src.content}</div>
+                                        `;
+                                        sourcesContainer.appendChild(div);
+                                    });
+                                }
+                                sourcesCard.style.display = 'block';
+                                answerCard.style.display = 'block'; // 提早亮出回答外框，準備打字
+
+                            } else if (currentEventName === 'token') {
+                                // 第二步：收到字元，立刻在畫面上不換行貼上，實現打字機動畫！
+                                accumulatedAnswer += dataContent;
+                                answerContainer.innerText = accumulatedAnswer;
+
+                            } else if (currentEventName === 'done') {
+                                // 第三步：大功告成，正式把這輪記錄寫進前端對話記憶
+                                answerContainer.innerHTML = renderMarkdown(accumulatedAnswer);
+                                
+                                const payload = JSON.parse(dataContent);
+                                const finalAnswer = payload.full_answer || accumulatedAnswer;
+                                
+                                conversationHistory.push({ role: "user", content: query });
+                                conversationHistory.push({ role: "assistant", content: finalAnswer });
+                            } else if (currentEventName === 'error') {
+                                alert('後端錯誤: ' + dataContent);
+                            }
+                        }
+                    }
+                }
+
+            } catch (error) {
+                alert('發生錯誤: ' + error.message);
+            } finally {
+                // 解除載入狀態，允許下一輪問答
+                inputEl.disabled = false;
+                btnEl.disabled = false;
+                loadingEl.style.display = 'none';
+                inputEl.focus();
+            }
+        }
+        // ==========================================
+        // 🌟 這裡開始是新加入的知識庫動態 Summary 邏輯
+        // ==========================================
+        async function updateKBSummary() {
+            try {
+                // 向我們新寫的後端狀態 API 索取數據
+                const response = await fetch('/api/stats');
+                if (!response.ok) throw new Error('無法取得狀態數據');
+                
+                const data = await response.json();
+                const summaryText = document.getElementById('summary-text');
+                
+                // 根據後端回傳的數量進行動態排版渲染
+                if (data.files_indexed === 0 && data.sections_indexed === 0) {
+                    summaryText.innerHTML = `<span style="color:#dc3545; font-weight:bold;">後端大腦目前為空，請先在終端機發送 curl 建立索引。</span>`;
+                } else {
+                    summaryText.innerHTML = `目前架構內共包含 <span style="font-size:16px; color:#e67e22; font-weight:bold;">${data.files_indexed}</span> 個核心範疇，共 <span style="font-size:16px; color:#e67e22; font-weight:bold;">${data.sections_indexed}</span> 個主題章節。`;
+                }
+            } catch (error) {
+                console.error("更新統計資訊失敗:", error);
+                const summaryText = document.getElementById('summary-text');
+                if (summaryText) {
+                    summaryText.innerText = "無法連線至後端服務，請確認伺服器是否正常啟動。";
+                }
+            }
+        }
+
+        // 當網頁載入完成 (DOM 就緒) 後，自動觸發並拉取後端最新統計
+        window.addEventListener('DOMContentLoaded', updateKBSummary);
+        function renderMarkdown(text) {
+            return text
+            // 連結 [文字](網址) → <a href="網址">文字</a>
+            .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>')
+            // 粗體 **文字** → <strong>文字</strong>
+            .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+            // 有序清單 1. 文字 → <li>
+            .replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>')
+            // 無序清單 - 文字 → <li>
+            .replace(/^-\s+(.+)$/gm, '<li>$1</li>')
+            // 換行
+            .replace(/\n/g, '<br>');
+        }
+    </script>
+</body>
+</html>
