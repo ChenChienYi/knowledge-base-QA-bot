@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG 離線評估調參控制台</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 0; background-color: #f5f7f8; color: #333; }
+        
+        /* 共用導覽列樣式 */
+        .navbar { background-color: #1a73e8; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; color: white; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 30px; }
+        .navbar a { color: white; text-decoration: none; font-weight: bold; padding: 8px 12px; border-radius: 4px; transition: background 0.2s; }
+        .navbar a:hover, .navbar a.active { background-color: rgba(255,255,255,0.2); }
+        .nav-links { display: flex; gap: 10px; }
+
+        .container { padding: 0 20px; }
+        h1 { color: #1a73e8; text-align: center; margin-top: 0; margin-bottom: 5px; }
+        .subtitle { text-align: center; color: #666; margin-bottom: 30px; font-size: 15px; }
+        
+        /* 1. 超參數控制台 */
+        .upload-section { background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); text-align: center; margin-bottom: 30px; border-top: 5px solid #1a73e8; }
+        .control-panel { display: flex; flex-wrap: wrap; justify-content: center; gap: 15px; margin: 20px 0; padding: 15px; background: #f8f9fa; border-radius: 8px; }
+        .control-item { display: flex; flex-direction: column; align-items: flex-start; }
+        .control-item label { font-size: 13px; font-weight: bold; color: #555; margin-bottom: 5px; }
+        .control-item select, .control-item input { padding: 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; outline: none; }
+        .control-item input[type="number"] { width: 80px; }
+        
+        button { padding: 12px 25px; background-color: #34a853; color: white; border: none; border-radius: 6px; font-size: 16px; cursor: pointer; font-weight: bold; transition: 0.2s; box-shadow: 0 2px 4px rgba(52, 168, 83, 0.3); }
+        button:hover { background-color: #2d9249; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; box-shadow: none; }
+
+        #loading { display: none; text-align: center; margin: 20px 0; font-size: 16px; color: #666; font-style: italic; }
+
+        /* 2. 宏觀數據卡片 */
+        .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 15px; margin-bottom: 30px; display: none; }
+        .metric-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); text-align: center; }
+        .metric-card.good-card { border-bottom: 4px solid #34a853; }
+        .metric-card.bad-card { border-bottom: 4px solid #ea4335; }
+        .metric-card h3 { margin: 0 0 10px 0; font-size: 13px; color: #666; text-transform: uppercase; }
+        .metric-val { font-size: 28px; font-weight: bold; color: #333; margin-bottom: 5px; }
+        .metric-desc { font-size: 12px; color: #888; }
+
+        /* 3. Bad Case 驗屍清單 */
+        #details-container { display: none; }
+        .section-title { font-size: 18px; color: #ea4335; border-bottom: 2px solid #ea4335; padding-bottom: 5px; margin-bottom: 20px; display: inline-block; font-weight: bold; }
+        .query-row { background: white; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); overflow: hidden; border-left: 5px solid #ea4335; }
+        .query-header { background: #fffaf9; padding: 15px; font-weight: bold; font-size: 15px; border-bottom: 1px solid #f5c6cb; color: #333; display: flex; justify-content: space-between; align-items: center; }
+        .query-body { padding: 15px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .strategy-title { font-weight: bold; color: #555; margin-bottom: 8px; font-size: 14px; border-bottom: 1px dashed #ccc; padding-bottom: 4px; }
+        .answer-box { background: #f8f9fa; border: 1px solid #eee; padding: 10px; border-radius: 6px; font-size: 14px; line-height: 1.5; color: #444; margin-top: 5px; }
+        
+        /* 標籤 */
+        .badge { padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }
+        .badge-danger { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .badge-warning { background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+        .badge-info { background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+        
+        .source-item { font-size: 13px; color: #666; background: #fff; border: 1px solid #eee; padding: 5px; margin-bottom: 5px; border-radius: 4px; }
+        .empty-state { text-align: center; padding: 40px; color: #888; background: #fff; border-radius: 8px; border: 1px dashed #ccc; font-size: 16px; }
+
+        /* 4. 實驗歷史紀錄表格 */
+        #history-container { display: none; margin-bottom: 30px; }
+        .history-table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.05); text-align: center; font-size: 14px; }
+        .history-table th { background: #f1f3f4; padding: 12px; font-weight: bold; color: #555; border-bottom: 2px solid #ddd; }
+        .history-table td { padding: 12px; border-bottom: 1px solid #eee; color: #444; }
+        .history-table tr:hover { background-color: #f8f9fa; }
+        .score-highlight { font-weight: bold; color: #1a73e8; }
+        .error-highlight { color: #ea4335; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <nav class="navbar">
+        <div style="font-size: 18px; font-weight: bold;">🏢 企業知識庫系統</div>
+        <div class="nav-links">
+            <a href="index.html">💬 QA 客服大廳</a>
+            <a href="eval.html" class="active">📊 評估調參控制台</a>
+        </div>
+    </nav>
+
+    <div class="container">
+        <h1>🚀 RAG 離線評估與調參模擬器</h1>
+        <div class="subtitle">動態切換大腦參數，即時驗證檢索指標與誤差歸因</div>
+        
+        <div class="upload-section">
+            <div>
+                <label style="font-weight:bold; margin-right: 10px;">📂 測試集 (Golden Dataset):</label>
+                <input type="file" id="file-input" accept=".jsonl">
+            </div>
+            
+            <div class="control-panel">
+                <div class="control-item">
+                    <label>測試題數 (Limit)</label>
+                    <select id="limit">
+                        <option value="5">5 題 (極速測試)</option>
+                        <option value="20" selected>20 題 (建議)</option>
+                        <option value="50">50 題 (完整跑分)</option>
+                    </select>
+                </div>
+                <div class="control-item">
+                    <label>切塊大小 (Chunk Size)</label>
+                    <select id="chunk-size">
+                        <option value="300">300 (細顆粒)</option>
+                        <option value="500" selected>500 (適中)</option>
+                        <option value="1000">1000 (大段落)</option>
+                    </select>
+                </div>
+                <div class="control-item">
+                    <label>Embedding 模型</label>
+                    <select id="embed-model">
+                        <option value="text-embedding-3-small" selected>3-small (便宜快速)</option>
+                        <option value="text-embedding-ada-002">ada-002 (經典)</option>
+                        <option value="ibm-granite/granite-embedding-311m-multilingual-r2">IBM Granite 311M (Local)</option>
+                    </select>
+                </div>
+                <div class="control-item">
+                    <label>LLM 裁判生成模型</label>
+                    <select id="llm-model">
+                        <option value="gpt-4o-mini" selected>gpt-4o-mini</option>
+                        <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
+                    </select>
+                </div>
+                <div class="control-item">
+                    <label>檢索門檻 (Threshold)</label>
+                    <input type="number" id="threshold" value="0.016" step="0.001">
+                </div>
+                <div class="control-item">
+                    <label>取前幾名 (Top K)</label>
+                    <input type="number" id="top-k" value="3" min="1" max="10">
+                </div>
+            </div>
+
+            <button id="run-btn" onclick="runEvaluation()">開始評估對決</button>
+            <p style="font-size: 12px; color: #888; margin-top: 10px;">⚠️ 提示：如果更改了 Chunk Size 或 Embedding 模型，後端會自動重新建置大腦。</p>
+        </div>
+
+        <div id="loading">⏳ 正在呼叫後端重建大腦並進行批次評估，這需要一點時間，請稍候...</div>
+
+        <div class="metrics-grid" id="metrics-grid">
+            <div class="metric-card good-card">
+                <h3>Hit Rate (命中率)</h3>
+                <div class="metric-val" id="val-hit">--</div>
+                <div class="metric-desc">標準答案是否在 Top K 內</div>
+            </div>
+            <div class="metric-card good-card">
+                <h3>Avg MRR</h3>
+                <div class="metric-val" id="val-mrr">--</div>
+                <div class="metric-desc">標準答案的平均排名分數</div>
+            </div>
+            <div class="metric-card good-card">
+                <h3>Precision @ K</h3>
+                <div class="metric-val" id="val-pak">--</div>
+                <div class="metric-desc">檢索結果的精準度雜訊比</div>
+            </div>
+            <div class="metric-card bad-card" title="False Acceptance Rate: 遇到陷阱題卻亂掰答案的機率">
+                <h3>FAR 誤答率 (幻覺)</h3>
+                <div class="metric-val" id="val-far" style="color:#ea4335;">--</div>
+                <div class="metric-desc">陷阱題沒拒答的比例</div>
+            </div>
+            <div class="metric-card bad-card" title="False Rejection Rate: 明明有抓對資料，LLM卻保守拒答的機率">
+                <h3>FRR 誤拒率 (過度保守)</h3>
+                <div class="metric-val" id="val-frr" style="color:#ea4335;">--</div>
+                <div class="metric-desc">檢索對卻拒答的比例</div>
+            </div>
+            <div class="metric-card bad-card" title="Time To First Token: 體感反應時間">
+                <h3>TTFT (首字吐出)</h3>
+                <div class="metric-val" id="val-ttft" style="color:#fbbc05;">--</div>
+                <div class="metric-desc">體感速度 (毫秒)</div>
+            </div>
+            <div class="metric-card bad-card" title="Total Latency: 從發問到回答結束的總時間">
+                <h3>Total Latency</h3>
+                <div class="metric-val" id="val-latency" style="color:#fbbc05;">--</div>
+                <div class="metric-desc">完整生成耗時 (毫秒)</div>
+            </div>
+        </div>
+
+        <div id="history-container">
+            <div class="section-title" style="color: #1a73e8; border-color: #1a73e8;">📈 實驗歷史紀錄 (Experiment Log)</div>
+            <table class="history-table">
+                <thead>
+                    <tr>
+                        <th>時間</th>
+                        <th>Chunk</th>
+                        <th>Embed</th>
+                        <th>LLM</th>
+                        <th>Threshold</th>
+                        <th>Top K</th>
+                        <th>Hit Rate</th>
+                        <th>MRR</th>
+                        <th>TTFT</th>
+                        <th>Latency</th>
+                        <th>FAR (幻覺)</th>
+                        <th>FRR (誤拒)</th>
+                    </tr>
+                </thead>
+                <tbody id="history-tbody">
+                    </tbody>
+            </table>
+        </div>
+
+        <div id="details-container">
+            <div class="section-title">🛑 錯誤診斷清單 (Bad Cases)</div>
+            <div id="bad-cases-list"></div>
+        </div>
+    </div>
+
+    <script>
+        async function runEvaluation() {
+            const fileInput = document.getElementById('file-input');
+            const runBtn = document.getElementById('run-btn');
+            const loading = document.getElementById('loading');
+            const metricsGrid = document.getElementById('metrics-grid');
+            const detailsContainer = document.getElementById('details-container');
+            const badCasesList = document.getElementById('bad-cases-list');
+
+            if (fileInput.files.length === 0) {
+                alert("請先上傳 golden_dataset.jsonl 檔案！");
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            
+            // 抓取所有超參數，因為後端現在使用 Form(...) 接收
+            formData.append('limit', document.getElementById('limit').value);
+            formData.append('chunk_size', document.getElementById('chunk-size').value);
+            formData.append('embedding_model', document.getElementById('embed-model').value);
+            formData.append('llm_model', document.getElementById('llm-model').value);
+            formData.append('threshold', document.getElementById('threshold').value);
+            formData.append('top_k', document.getElementById('top-k').value);
+
+            // 切換畫面狀態
+            runBtn.disabled = true;
+            loading.style.display = 'block';
+            metricsGrid.style.display = 'none';
+            detailsContainer.style.display = 'none';
+            badCasesList.innerHTML = '';
+
+            try {
+                // 呼叫後端 API
+                const response = await fetch(`http://localhost:8000/api/evaluate`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.detail || '評估 API 呼叫失敗');
+                }
+
+                const data = await response.json();
+                
+                // 渲染卡片
+                renderMetrics(data.aggregate_metrics);
+                // 渲染 Bad Cases
+                renderBadCases(data.details);
+                appendHistoryLog(data.aggregate_metrics);
+                document.getElementById('history-container').style.display = 'block';
+
+                metricsGrid.style.display = 'grid';
+                detailsContainer.style.display = 'block';
+
+            } catch (error) {
+                alert("發生錯誤：" + error.message);
+                console.error(error);
+            } finally {
+                runBtn.disabled = false;
+                loading.style.display = 'none';
+            }
+        }
+
+        function renderMetrics(agg) {
+            const perf = agg.performance;
+            const errs = agg.errors;
+            
+            document.getElementById('val-hit').innerText = (perf.hit_rate * 100).toFixed(1) + '%';
+            document.getElementById('val-mrr').innerText = perf.avg_mrr.toFixed(2);
+            document.getElementById('val-pak').innerText = (perf.avg_precision_at_k * 100).toFixed(1) + '%';
+            
+            document.getElementById('val-far').innerText = (errs.far_rate * 100).toFixed(1) + '%';
+            document.getElementById('val-frr').innerText = (errs.frr_rate * 100).toFixed(1) + '%';
+            document.getElementById('val-ttft').innerText = perf.avg_ttft_ms + ' ms';
+            document.getElementById('val-latency').innerText = perf.avg_latency_ms + ' ms';
+        }
+
+        function renderBadCases(details) {
+            const container = document.getElementById('bad-cases-list');
+            
+            // 過濾出所有非成功的案件
+            const badCases = details.filter(item => !item.error_type.includes("✅"));
+
+            if (badCases.length === 0) {
+                container.innerHTML = '<div class="empty-state">🎉 太棒了！本次測試參數組合完美，沒有產生任何錯誤 (Bad Case)！</div>';
+                return;
+            }
+
+            badCases.forEach((item, index) => {
+                // 決定錯誤標籤顏色
+                let badgeClass = "badge-danger";
+                if (item.error_type.includes("LLM")) badgeClass = "badge-warning";
+                
+                // 渲染實際撈到的 Top 來源
+                let sourcesHtml = item.sources.length === 0 ? '<div style="color:#ea4335; font-size:13px;">(未撈取到任何超過門檻的資料)</div>' : '';
+                item.sources.forEach((src, i) => {
+                    let isMatch = src.chunk_id === item.expected_id ? '✨(命中)' : '';
+                    sourcesHtml += `<div class="source-item">[${i+1}] ${src.heading} <span style="color:#34a853; font-weight:bold;">${isMatch}</span><br>ID: ${src.chunk_id} | Score: ${src.score}</div>`;
+                });
+
+                const html = `
+                    <div class="query-row">
+                        <div class="query-header">
+                            <div>
+                                <span class="badge ${badgeClass}" style="margin-right:10px;">${item.error_type}</span>
+                                Q: ${item.query}
+                            </div>
+                            <div style="font-size:13px; color:#888; font-weight:normal;">耗時: ${item.latency_ms}ms</div>
+                        </div>
+                        <div class="query-body">
+                            <div>
+                                <div class="strategy-title">🔍 檢索分析 (Expected ID: <span style="color:#1a73e8">${item.expected_id || '無 (陷阱題)'}</span>)</div>
+                                <div style="margin-top:10px;">${sourcesHtml}</div>
+                            </div>
+                            <div>
+                                <div class="strategy-title">🤖 LLM 最終回答</div>
+                                <div class="answer-box">${item.answer.replace(/\n/g, '<br>')}</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                container.innerHTML += html;
+            });
+        }
+        function appendHistoryLog(agg) {
+            const tbody = document.getElementById('history-tbody');
+            const p = agg.parameters_used;
+            const perf = agg.performance;
+            const errs = agg.errors;
+            
+            // 取得當下時間
+            const now = new Date();
+            const timeStr = now.getHours().toString().padStart(2, '0') + ':' + 
+                            now.getMinutes().toString().padStart(2, '0') + ':' + 
+                            now.getSeconds().toString().padStart(2, '0');
+
+            // 建立新的一列 (tr)
+            const tr = document.createElement('tr');
+            
+            // 為了版面簡潔，把模型名稱縮短
+            const shortEmbed = p.embedding_model.replace('text-embedding-', '');
+            
+            tr.innerHTML = `
+                <td style="color:#888;">${timeStr}</td>
+                <td>${p.chunk_size}</td>
+                <td>${shortEmbed}</td>
+                <td>${p.llm_model}</td>
+                <td>${p.threshold}</td>
+                <td>${p.top_k}</td>
+                <td class="score-highlight">${(perf.hit_rate * 100).toFixed(1)}%</td>
+                <td class="score-highlight">${perf.avg_mrr.toFixed(3)}</td>
+                <td style="font-weight:bold; color:#fbbc05;">${perf.avg_ttft_ms}</td>
+                <td style="font-weight:bold; color:#fbbc05;">${perf.avg_latency_ms}</td>
+                <td class="error-highlight">${(errs.far_rate * 100).toFixed(1)}%</td>
+                <td class="error-highlight">${(errs.frr_rate * 100).toFixed(1)}%</td>
+            `;
+            
+            // 將最新的紀錄插在表格的「最上方」
+            tbody.insertBefore(tr, tbody.firstChild);
+        }
+    </script>
+</body>
+</html>

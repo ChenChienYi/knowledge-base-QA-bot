@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import os
@@ -7,8 +8,10 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from langchain.schema import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+# from langchain.schema import Document
+from langchain_core.documents import Document
+# from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 
@@ -19,11 +22,32 @@ while _current.name != "scaffold" and _current.parent != _current:
 ROOT_DIR = _current.parent
 
 DOCS_DIR = ROOT_DIR / "docs"
-FAISS_DIR = ROOT_DIR / ".kb" / "faiss_index"
-BM25_INDEX_PATH = ROOT_DIR / ".kb" / "index.json"  # 👈 規格要求的 inspectable JSON
+# FAISS_DIR = ROOT_DIR / ".kb" / "faiss_index"
+# BM25_INDEX_PATH = ROOT_DIR / ".kb" / "index.json"  # 👈 規格要求的 inspectable JSON
+
+# 2. 🌟 將寫死路徑改為「動態路徑工廠」
+def get_kb_paths(embedding_model_name: str, chunk_size: int):
+    """
+    依據使用的模型與切塊大小，動態建立並回傳專屬的儲存路徑
+    """
+    safe_model_name = embedding_model_name.replace("/", "_")
+    # 資料夾名稱範例: .kb/text-embedding-3-small_c500 或 .kb/ibm-granite_granite-embedding-311m-multilingual-r2_c300
+    kb_folder = ROOT_DIR / ".kb" / f"{safe_model_name}_c{chunk_size}"
+    kb_folder.mkdir(parents=True, exist_ok=True)
+    
+    return {
+        "faiss_dir": kb_folder / "faiss_index",
+        "bm25_path": kb_folder / "index.json"
+    }
 
 EMBEDDING_MODEL = "text-embedding-3-small"
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+
+# 👇 新增這行：專門捕捉 
+METADATA_RE = re.compile(r"^<!--\s*(\{.*?\})\s*-->$")
+
+# 👇 新增這行：萃取 heading 中的 [cc_faq_xxxxxxxx] 格式 ID
+CHUNK_ID_RE = re.compile(r"^\[([a-zA-Z0-9_]+)\]\s*")
 
 # 繁體中文 + 英文數字混合斷詞器
 CHINESE_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
@@ -43,6 +67,7 @@ class BM25Section:
     heading_path: list[str]
     content: str
     tokens: list[str]
+    metadata: dict = None # 👈 新增這行：讓 BM25 也能儲存產品與標籤
 
     def to_dict(self) -> dict:
         return {
@@ -52,6 +77,7 @@ class BM25Section:
             "heading_path": self.heading_path,
             "content": self.content,
             "tokens": self.tokens,
+            "metadata": self.metadata or {} # 👈 匯出成 JSON 時一併匯出
         }
 
 def slugify(text: str) -> str:
@@ -67,86 +93,104 @@ def tokenize(text: str) -> list[str]:
     # 過濾掉停用字與空白
     return [t for t in tokens if t not in STOP_WORDS and t.strip()]
 
+# 🌟 【新增】根據 source 檔名與 heading 產生穩定的 hash ID
+def generate_chunk_id(src_file: str, heading: str) -> str:
+    """以 source#heading 為基礎產生 8 碼 MD5 hash ID，格式：{filename}_{hash}"""
+    raw = f"{src_file}#{heading}"
+    hash_suffix = hashlib.md5(raw.encode()).hexdigest()[:8]
+    base_name = src_file.replace(".md", "")
+    return f"{base_name}_{hash_suffix}"
+
 def load_markdown_sections(path: Path) -> list[Document]:
-    """文章拆解員：將 Markdown 檔案切成 Section-level 紀錄"""
+    """文章拆解員：將 Markdown 檔案切成 Section-level 紀錄，並支援讀取隱藏 Metadata"""
     content = path.read_text(encoding="utf-8")
     docs = []
     
-    current_heading = "Introduction"
+    # current_heading = "Introduction"
+    current_chunk_id = generate_chunk_id(path.name, "Introduction")  # 預設值
     heading_hierarchy = ["Introduction"]
     current_content = []
+    current_metadata = {}  # 👈 新增：暫存目前段落的標籤
 
     for line in content.splitlines():
-        match = HEADING_RE.match(line) 
-        if match:
+        heading_match = HEADING_RE.match(line) 
+        meta_match = METADATA_RE.match(line) # 👈 偵測是不是隱藏標籤
+        
+        if heading_match:
             text = "\n".join(current_content).strip()
             if text:
-                docs.append(Document(
-                    page_content=text,
-                    metadata={
-                        "source": path.name, 
-                        "heading": slugify(current_heading),
-                        "heading_path": list(heading_hierarchy)
-                    }
-                ))
-            
+                base_meta = {
+                    "source": path.name, 
+                    "heading": slugify(current_heading),
+                    "heading_path": list(heading_hierarchy),
+                    "chunk_id": current_chunk_id,  # 🌟 加入萃取到的 ID
+                }
+                base_meta.update(current_metadata) # 👈 將抓到的 Metadata 合併進去
+                docs.append(Document(page_content=text, metadata=base_meta))
+
             # 更新標題與層級結構
-            level = len(match.group(1)) # # 數量代表層級
-            current_heading = match.group(2)
+            level = len(heading_match.group(1))
+            raw_heading = heading_match.group(2)
+
+            # 🌟 嘗試從標題萃取 ID，萃取後的 heading 去掉 [id] 前綴
+            id_match = CHUNK_ID_RE.match(raw_heading)
             
-            # 動態調整 heading_path 樹狀結構
+            if id_match:
+                current_chunk_id = id_match.group(1)           # cc_faq_739305e6
+                current_heading = raw_heading[id_match.end():]  # Q1: 個人資料權利行使...
+            else:
+                current_chunk_id = generate_chunk_id(path.name, slugify(raw_heading))  # fallback
+                current_heading = raw_heading
+            
             if level == 1:
                 heading_hierarchy = [current_heading]
             else:
-                # 確保子標題能接在父標題後面
                 heading_hierarchy = heading_hierarchy[:level-1]
                 while len(heading_hierarchy) < level - 1:
                     heading_hierarchy.append("Unknown")
                 heading_hierarchy.append(current_heading)
                 
-            current_content = [line] 
+            current_content = [] 
+            current_metadata = {} # 👈 清空，準備迎接下個段落的標籤
+            
+        elif meta_match:
+            # 👈 如果抓到隱藏註解，就把它 Parse 成 JSON 字典
+            try:
+                current_metadata = json.loads(meta_match.group(1))
+            except json.JSONDecodeError:
+                print(f"⚠️ [Warning] 無法解析 {path.name} 中的 Metadata: {line}")
         else:
             current_content.append(line)
 
+    # 處理檔案最後一個段落
     text = "\n".join(current_content).strip()
     if text:
-        docs.append(Document(
-            page_content=text,
-            metadata={
-                "source": path.name, 
-                "heading": slugify(current_heading),
-                "heading_path": list(heading_hierarchy)
-            }
-        ))
+        base_meta = {
+            "source": path.name, 
+            "heading": slugify(current_heading),
+            "heading_path": list(heading_hierarchy)
+        }
+        base_meta.update(current_metadata)
+        docs.append(Document(page_content=text, metadata=base_meta))
         
     return docs
 
 class HybridIndexer:
     def __init__(self):
-        # 軌道一：Vector 變數
         self.vectorstore = None
         self._embeddings = None
         self.files_indexed = 0
         self.sections_indexed = 0
+
+        # 🌟 狀態追蹤器：紀錄現在腦袋裡裝的是哪一個模型與大小
+        self.current_chunk_size = 500
+        self.current_embedding_model = "text-embedding-3-small"
         
-        # 軌道二：BM25 變數 (補齊 markdown_kb 框架所需的變數)
         self.bm25_sections: list[BM25Section] = []
         self.doc_freq: Counter[str] = Counter()
         self.avg_doc_len = 0.0
 
-    def get_embeddings(self):
-        if not os.getenv("OPENAI_API_KEY"):
-            raise RuntimeError("OPENAI_API_KEY is not set in the server environment")
-        if self._embeddings is None:
-            self._embeddings = OpenAIEmbeddings(
-                model=EMBEDDING_MODEL,
-                request_timeout=20,
-                max_retries=1,
-            )
-        return self._embeddings
-
     def rebuild_stats(self) -> None:
-        """【補齊框架邏輯】計算 BM25 核心統計資料"""
         self.doc_freq = Counter()
         if not self.bm25_sections:
             self.avg_doc_len = 0.0
@@ -158,7 +202,6 @@ class HybridIndexer:
         for sec in self.bm25_sections:
             unique_files.add(sec.file)
             total_tokens += len(sec.tokens)
-            # 每一個 token 在此區塊中不論出現幾次，對 doc_freq 而言都只算包含一次
             for token in set(sec.tokens):
                 self.doc_freq[token] += 1
 
@@ -166,9 +209,8 @@ class HybridIndexer:
         self.sections_indexed = len(self.bm25_sections)
         self.avg_doc_len = total_tokens / self.sections_indexed
 
-    def write_index_json(self) -> None:
-        """【補齊框架邏輯】將統計大綱存入 inspectable JSON"""
-        os.makedirs(BM25_INDEX_PATH.parent, exist_ok=True)
+    def write_index_json(self, bm25_path: Path) -> None:
+        """存入 JSON，現在需要吃動態路徑參數"""
         payload = {
             "stats": {
                 "files_indexed": self.files_indexed,
@@ -177,68 +219,62 @@ class HybridIndexer:
             },
             "sections": [sec.to_dict() for sec in self.bm25_sections]
         }
-        with open(BM25_INDEX_PATH, "w", encoding="utf-8") as f:
+        with open(bm25_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
 
-# Wiki Index
-    def generate_wiki_index(self) -> None:
-        """從記憶體結構自動導出人類與 Agent 可讀的維基總目錄"""
-        if not self.bm25_sections:
-            return
+    def load_index(self, embedding_model: str = "text-embedding-3-small", chunk_size: int = 500) -> tuple[int, int]:
+        """
+        🌟 實驗核心：根據參數，喚醒對應目錄下的雙軌大腦
+        """
+        from .retrieval import get_embedding_model
+        self.current_embedding_model = embedding_model
+        self.current_chunk_size = chunk_size
+        
+        # 1. 取得當下參數專屬的存放目錄
+        paths = get_kb_paths(embedding_model, chunk_size)
+        
+        # 2. 準備對應的 Embedding 實體 (HuggingFace 或是 OpenAI)
+        self._embeddings = get_embedding_model(embedding_model)
 
-        WIKI_INDEX_PATH = ROOT_DIR / "wiki" / "index.md"
-        os.makedirs(WIKI_INDEX_PATH.parent, exist_ok=True)
+        # 3. 喚醒 FAISS 向量大腦
+        faiss_path = paths["faiss_dir"]
+        if (faiss_path / "index.faiss").exists():
+            self.vectorstore = FAISS.load_local(
+                folder_path=str(faiss_path),
+                embeddings=self._embeddings,
+                allow_dangerous_deserialization=True
+            )
+        else:
+            self.vectorstore = None # 找不到就設為 None，讓 eval_server 知道要觸發 rebuild
 
-        # 1. 初始化 Markdown 標題與基礎宏觀統計
-        md_lines = [
-            "# 📚 銀行內部知識庫總目錄 (Wiki Index)\n",
-            "*(本目錄由系統自動生成，請勿手動修改)*\n",
-            f"目前架構內共包含 **{self.files_indexed}** 個核心範疇，共 **{self.sections_indexed}** 個精確主題章節。\n",
-            "---\n"
-        ]
+        # 4. 喚醒 BM25 統計大腦
+        bm25_path = paths["bm25_path"]
+        if bm25_path.exists():
+            with open(bm25_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            self.bm25_sections = [BM25Section(**sec) for sec in payload["sections"]]
+            self.rebuild_stats()
+        else:
+            self.bm25_sections = []
 
-        # 2. 依據檔案名稱 (file) 將所有的知識區塊進行分門別類 (Grouping)
-        grouped_sections = {}
-        for sec in self.bm25_sections:
-            if sec.file not in grouped_sections:
-                grouped_sections[sec.file] = []
-            grouped_sections[sec.file].append(sec)
+        return self.files_indexed, self.sections_indexed
 
-        # 3. 開始建立有層級的樹狀 Markdown 結構
-        for file_name, sec_list in grouped_sections.items():
-            # 為每個文件建立一個獨立的次級大標題
-            icon = "💳" if "cc" in file_name.lower() else "💰"
-            md_lines.append(f"## {icon} {file_name.replace('_', ' ').title()} 範疇 (`{file_name}`)\n")
-            
-            for sec in sec_list:
-                # 排除單調的 Introduction 標題，只針對有意義的 FAQ 章節建立跳轉錨點
-                if sec.heading.lower() == "introduction":
-                    md_lines.append(f"* 📝 **文件導言 (Introduction)**\n")
-                    continue
-                
-                # 計算階層深度：根據 heading_path 的長度來決定縮排的空白數
-                # 這樣就能在 Markdown 中優雅呈現樹狀目錄
-                indent = "    " * (len(sec.heading_path) - 1) if len(sec.heading_path) > 1 else ""
-                
-                # 👈 核心命名公式：[呈現給人類看的標題文字](檔案路徑#精確的章節定位針)
-                md_lines.append(f"{indent}* 🔹 [{sec.heading}]({file_name}#{sec.heading})\n")
-            
-            md_lines.append("\n") # 每個檔案區塊間隔空一行
+    def build_index(self, chunk_size: int = 500, chunk_overlap: int = 50, embedding_model: str = "text-embedding-3-small") -> tuple[int, int]:
+        """
+        🌟 實驗核心：根據參數，重新切塊、算向量，並存入專屬目錄
+        """
+        from .retrieval import get_embedding_model
+        self.current_chunk_size = chunk_size
+        self.current_embedding_model = embedding_model
+        
+        # 取得專屬存放目錄
+        paths = get_kb_paths(embedding_model, chunk_size)
 
-        # 4. 將組裝好的完整 Markdown 內容強行寫入 wiki/index.md
-        with open(WIKI_INDEX_PATH, "w", encoding="utf-8") as f:
-            f.writelines(md_lines)
-        print(f"[Wiki Generator] Successfully auto-generated {WIKI_INDEX_PATH}", flush=True)
-
-    def build_index(self) -> tuple[int, int]:
-        """【核心融合】一鍵啟動雙軌索引建立流水線"""
         if not DOCS_DIR.exists():
             return 0, 0
 
         all_docs = []
         self.files_indexed = 0
-
-        # 1. 讀取所有 Markdown 文件
         for md_file in DOCS_DIR.glob("*.md"):
             sections = load_markdown_sections(md_file)
             all_docs.extend(sections)
@@ -247,119 +283,91 @@ class HybridIndexer:
         if not all_docs:
             return 0, 0
 
-        # 2. 針對「向量大腦」進行 Recursive 細切塊
+        # 動態調整切塊大小
         splitter = RecursiveCharacterTextSplitter(
-            chunk_size=500,
-            chunk_overlap=50,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
             separators=["\n\n", "\n", "。", "！", "？", "，", " "]
         )
         chunks = splitter.split_documents(all_docs)
 
-        # 3. 建立 【軌道一】：FAISS 向量大腦
-        self.vectorstore = FAISS.from_documents(chunks, self.get_embeddings())
-        if FAISS_DIR.exists():
-            shutil.rmtree(FAISS_DIR)
-        FAISS_DIR.mkdir(parents=True, exist_ok=True)
-        self.vectorstore.save_local(str(FAISS_DIR))
-
-        # 4. 建立 【軌道二】：將切塊好的 Chunks 轉換成 BM25 關鍵字統計物件
         self.bm25_sections = []
         for idx, chunk in enumerate(chunks):
             src_file = chunk.metadata.get("source", "unknown")
             heading = chunk.metadata.get("heading", "unknown")
             heading_path = chunk.metadata.get("heading_path", [heading])
+
+            sec_id = chunk.metadata.get("chunk_id") or generate_chunk_id(src_file, heading)
+            chunk.metadata["chunk_id"] = sec_id
             
-            # 建立可以用來配對的 token 清單 (包含標題路徑與內文)
             token_text = " ".join(heading_path) + " " + chunk.page_content
             tokens = tokenize(token_text)
-            
-            sec_id = f"{src_file}#{heading}__chunk{idx}"
+
             self.bm25_sections.append(BM25Section(
-                id=sec_id,
-                file=src_file,
-                heading=heading,
-                heading_path=heading_path,
-                content=chunk.page_content,
-                tokens=tokens
+                id=sec_id, file=src_file, heading=heading, heading_path=heading_path,
+                content=chunk.page_content, tokens=tokens, metadata=chunk.metadata
             ))
 
-        # 5. 計算 BM25 統計指標並導出 JSON
-        self.rebuild_stats()
-        self.write_index_json()
+        # 呼叫 retrieval 的工廠取得正確的 Embedding 模型
+        self._embeddings = get_embedding_model(embedding_model)
         
-        # 6. 把總目錄製作出來
-        self.generate_wiki_index()
+        # 建立 FAISS 向量大腦並存檔
+        self.vectorstore = FAISS.from_documents(chunks, self._embeddings)
+        
+        if paths["faiss_dir"].exists():
+            shutil.rmtree(paths["faiss_dir"])
+        paths["faiss_dir"].mkdir(parents=True, exist_ok=True)
+        self.vectorstore.save_local(str(paths["faiss_dir"]))
 
-        # 寫入向量專屬的 metadata.json 以相容舊規格
+        # 儲存 BM25 統計大腦
+        self.rebuild_stats()
+        self.write_index_json(paths["bm25_path"])
+
+        # 寫入 metadata 紀錄
         vector_metadata = {
-            "embedding_model": EMBEDDING_MODEL,
+            "embedding_model": embedding_model,
+            "chunk_size": chunk_size,
             "files_indexed": self.files_indexed,
             "sections_indexed": self.sections_indexed
         }
-        with open(FAISS_DIR / "metadata.json", "w", encoding="utf-8") as f:
+        with open(paths["faiss_dir"] / "metadata.json", "w", encoding="utf-8") as f:
             json.dump(vector_metadata, f, indent=2)
 
         return self.files_indexed, self.sections_indexed
 
-    def load_index(self) -> tuple[int, int]:
-        """當伺服器重新啟動時，從硬碟同時喚醒雙軌大腦"""
-        # 1. 喚醒向量大腦
-        if (FAISS_DIR / "index.faiss").exists():
-            self.vectorstore = FAISS.load_local(
-                folder_path=str(FAISS_DIR),
-                embeddings=self.get_embeddings(),
-                allow_dangerous_deserialization=True
-            )
-        
-        # 2. 喚醒 BM25 統計大腦
-        if BM25_INDEX_PATH.exists():
-            with open(BM25_INDEX_PATH, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            self.bm25_sections = [
-                BM25Section(**sec) for sec in payload["sections"]
-            ]
-            self.rebuild_stats()
-
-        return self.files_indexed, self.sections_indexed
-
     def bm25_score(self, query_tokens: list[str], section: BM25Section, k1: float = 1.5, b: float = 0.75) -> float:
-        """【補齊框架邏輯】實作精準的 BM25 數學計算公式"""
         score = 0.0
         doc_len = len(section.tokens)
         if doc_len == 0 or self.avg_doc_len == 0:
             return 0.0
 
-        # 計算當前區塊的詞頻統計
         tf_counter = Counter(section.tokens)
-
         for token in query_tokens:
             if token not in section.tokens:
                 continue
 
             tf = tf_counter[token]
             df = self.doc_freq.get(token, 0)
-            
-            # 計算 逆向文件頻率 (IDF)
-            # 使用經典的 BM25 IDF 公式，加上 0.5 避免負數
             idf = math.log((self.sections_indexed - df + 0.5) / (df + 0.5) + 1.0)
-            
-            # BM25 核心公式（結合字數正規化）
             tf_component = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * (doc_len / self.avg_doc_len)))
             term_score = idf * tf_component
             
-            # 加分項修正 (Stretch Hint)：如果關鍵字出現在標題路徑中，額外給予 20% 權重加成
             if any(token in hp.lower() for hp in section.heading_path):
                 term_score *= 1.2
 
             score += term_score
-
         return score
 
-# 宣告全局單例，保持與原有程式架構的相容性
+# 宣告全局單例
 indexer = HybridIndexer()
 
+# 為了讓外部可以直接呼叫 (預設參數)
 def build_index() -> tuple[int, int]:
     return indexer.build_index()
 
 def load_index_json() -> tuple[int, int]:
     return indexer.load_index()
+
+if __name__ == "__main__":
+    files, sections = build_index()
+    print(f"✅ 建索引完成：{files} 個檔案，{sections} 個 sections")
