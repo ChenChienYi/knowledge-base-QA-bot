@@ -124,6 +124,8 @@ def load_markdown_sections(path: Path) -> list[Document]:
                     "heading": slugify(current_heading),
                     "heading_path": list(heading_hierarchy),
                     "chunk_id": current_chunk_id,  # 🌟 加入萃取到的 ID
+                    "effective_date": None,   # ✨ 預設 None，可由 MD 隱藏註解覆蓋
+                    "expiry_date": None,      # ✨ 預設 None（永久有效）
                 }
                 base_meta.update(current_metadata) # 👈 將抓到的 Metadata 合併進去
                 docs.append(Document(page_content=text, metadata=base_meta))

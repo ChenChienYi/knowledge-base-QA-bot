@@ -31,11 +31,11 @@ SYSTEM_PROMPT = """你是一個專業的銀行客服 AI 助手。
 
 **規則：**
 1. 你只能使用參考資料中出現的資訊，絕對不能憑空捏造或使用外部知識。
-2. 如果參考資料中找不到答案，請明確回答：「很抱歉，知識庫中目前沒有相關資訊。」
+2. 如果參考資料中找不到答案，請明確回答：「很抱歉，知識庫中目前沒有相關資訊。」，且不要附上任何來源引用。
 3. 每次回答時，必須引用資料來源。請完全照抄參考資料上方的 `[Source: filename#heading]` 格式。
 4. 請務必使用流暢的**台灣繁體中文**進行回答。
 5. 回答時請使用條列格式，每個步驟單獨一行，不要把所有內容擠在同一行。
-6. 來源引用請放在回答的最末行，格式為：📚 來源：[Source: filename#heading]"""
+6. 來源引用請放在回答的最末行，格式為：📚 來源：[Source: filename#heading]。若為拒答，則不附來源。"""
 
 REWRITE_SYSTEM_PROMPT = """你是一個 RAG 系統的「前置問題重寫專家」。
 你的任務是根據使用者過去的【對話歷史紀錄】，將使用者【當下的最新口語發問】，重寫成一個「完全獨立、意思明確、且包含完整金融專有名詞」的繁體中文搜尋關鍵字句子。
@@ -97,8 +97,15 @@ def rewrite_query(current_query: str, history_list: list) -> str:
 
     formatted_history = []
     for msg in history_list[-6:]:
-        role_label = "使用者" if msg.role == "user" else "AI 客服"
-        formatted_history.append(f"{role_label}: {msg.content}")
+        # ✨ 修正：相容 dict 與 Pydantic model 兩種格式
+        if isinstance(msg, dict):
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+        else:
+            role = msg.role
+            content = msg.content
+        role_label = "使用者" if role == "user" else "AI 客服"
+        formatted_history.append(f"{role_label}: {content}")
     history_context = "\n".join(formatted_history)
 
     prompt = (
@@ -210,6 +217,22 @@ def hybrid_search(question: str, k: int = 3, filter_dict: dict = None) -> list:
 
 HYBRID_THRESHOLD = 0.016
 
+from datetime import date as _date
+
+def is_chunk_valid(metadata: dict) -> bool:
+    """檢查 chunk 是否在有效日期範圍內"""
+    today = _date.today()
+    effective = metadata.get("effective_date")
+    expiry    = metadata.get("expiry_date")
+    try:
+        if effective and today < _date.fromisoformat(effective):
+            return False   # 尚未生效
+        if expiry and today > _date.fromisoformat(expiry):
+            return False   # 已過期
+    except (ValueError, TypeError):
+        pass  # 日期格式有誤時不過濾，保留 chunk
+    return True
+
 
 # ──────────────────────────────────────────────────────────────────
 # query()  ← 同步版，Langfuse v4 插樁
@@ -232,8 +255,11 @@ def query(question: str, history: list = None, filter_dict: dict = None,
         # Step 2: Hybrid Retrieval (🌟 實作規格 2：動態門檻)
         ranked_chunks = hybrid_search(search_query, k=top_k, filter_dict=filter_dict)
         
-        # 🌟 透過外部傳入的 threshold 來決定哪些 Chunk 及格
-        valid_chunks = [(doc, score) for doc, score in ranked_chunks if score >= threshold]
+        # 🌟 透過外部傳入的 threshold 來決定哪些 Chunk 及格，同時過濾過期內容
+        valid_chunks = [
+            (doc, score) for doc, score in ranked_chunks
+            if score >= threshold and is_chunk_valid(doc.metadata)
+        ]
         no_context = len(valid_chunks) == 0
 
         if no_context:
@@ -300,7 +326,10 @@ async def query_stream(question: str, history: list = None, filter_dict: dict = 
         ranked_chunks = await loop.run_in_executor(
             None, hybrid_search, search_query, 3, filter_dict
         )
-        valid_chunks = [(doc, score) for doc, score in ranked_chunks if score >= HYBRID_THRESHOLD]
+        valid_chunks = [
+            (doc, score) for doc, score in ranked_chunks
+            if score >= HYBRID_THRESHOLD and is_chunk_valid(doc.metadata)  # ✨ 加入日期過濾
+        ]
 
     except Exception as e:
         logger.error(f"[Stream] 檢索階段錯誤: {e}")
@@ -308,8 +337,32 @@ async def query_stream(question: str, history: list = None, filter_dict: dict = 
         return
 
     if not valid_chunks:
-        yield "event: token\ndata: 很抱歉，知識庫中目前沒有相關資訊。\n\n"
-        yield "event: done\ndata: {}\n\n"
+        # 寫入 DB（拒答）
+        try:
+            from .database import insert_feedback
+            import uuid
+            raw_sources = [
+                {
+                    "source": doc.metadata.get("source", "unknown"),
+                    "heading": doc.metadata.get("heading", "unknown"),
+                    "score": round(float(score), 4),
+                    "content": doc.page_content[:240],
+                }
+                for doc, score in ranked_chunks
+            ]
+            insert_feedback(
+                session_id=str(uuid.uuid4()),
+                user_question=question,
+                llm_answer="",
+                retrieved_sources=raw_sources,
+                status="refused",
+            )
+        except Exception as db_err:
+            logger.warning(f"[Stream] 拒答寫入 DB 失敗: {db_err}")
+
+        refused_msg = "很抱歉，知識庫中目前沒有相關資訊。\n\n如需進一步協助，請轉接總機 **0800-123-123**，將由專人為您服務。"
+        yield f"event: token\ndata: {refused_msg}\n\n"
+        yield f"event: done\ndata: {json.dumps({'full_answer': refused_msg}, ensure_ascii=False)}\n\n"
         return
 
     try:
@@ -358,7 +411,9 @@ async def query_stream(question: str, history: list = None, filter_dict: dict = 
                     ttft_ms = int((first_token_time - stream_start) * 1000)
                     logger.info(f"[Stream] TTFT: {ttft_ms}ms")
                 full_answer += token
-                yield f"event: token\ndata: {token}\n\n"
+                # ✨ 修正：token 內含換行時用 JSON 包裝，避免破壞 SSE 格式
+                safe_token = json.dumps(token, ensure_ascii=False)
+                yield f"event: token\ndata: {safe_token}\n\n"
 
     except Exception as e:
         logger.error(f"[Stream] LLM 串流錯誤: {e}")

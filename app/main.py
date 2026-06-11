@@ -15,7 +15,8 @@ import time
 import uuid
 
 from fastapi import FastAPI, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from .hybrid_indexer import load_index_json
 from .routes import router
@@ -37,8 +38,14 @@ logger = logging.getLogger("rag.access")
 # ──────────────────────────────────────────
 app = FastAPI(title="Vector RAG Knowledge Base Q&A Bot")
 
+app.mount("/static", StaticFiles(directory="static"), name="static")  # ✨ 新增
+
 app.include_router(new_router)
 app.include_router(router)
+
+@app.get("/")
+async def root():
+    return RedirectResponse(url="/static/index.html")  # ✨ 新增
 
 
 # ──────────────────────────────────────────
@@ -88,6 +95,11 @@ async def access_log_middleware(request: Request, call_next):
 # ──────────────────────────────────────────
 @app.on_event("startup")
 def load_persisted_index():
+    # 初始化本地 SQLite DB
+    from .database import init_db
+    init_db()
+    logger.info("[DB] qa_feedback table ready.")
+
     try:
         files_count, sections_count = load_index_json()
         logger.info(
@@ -104,4 +116,3 @@ def load_persisted_index():
 def shutdown_flush():
     logger.info("[Langfuse] Flushing events before shutdown...")
     flush()
-    logger.info("[Langfuse] Flush complete.")

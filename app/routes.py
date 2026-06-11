@@ -3,7 +3,7 @@ from fastapi import APIRouter
 # 👈 核心關鍵：將原本引入的舊模組，全部改為引入你剛剛改好的 hybrid 完全體！
 from .hybrid_indexer import build_index
 from .retrieval import query  # 這會引入已經改好 RRF 融合與 HYBRID_THRESHOLD 的新 query
-from .schemas import ChatRequest, ChatResponse, IndexResponse
+from .schemas import ChatRequest, ChatResponse, IndexResponse, NegativeFeedbackRequest
 
 # 🌟 核心修正：安全補上 StreamingResponse 的引入，消滅 NameError
 from fastapi.responses import StreamingResponse
@@ -45,4 +45,21 @@ def get_stats():
     return {
         "files_indexed": indexer.files_indexed,
         "sections_indexed": indexer.sections_indexed
+    }
+
+
+@router.post("/feedback/negative")
+def submit_negative_feedback(req: NegativeFeedbackRequest):
+    """User 點「沒幫助」時呼叫，寫入 qa_feedback (status=negative)，並回傳轉真人訊息"""
+    from .database import insert_feedback
+    record_id = insert_feedback(
+        session_id=req.session_id,
+        user_question=req.user_question,
+        llm_answer=req.llm_answer,
+        retrieved_sources=req.retrieved_sources,
+        status="negative",
+    )
+    return {
+        "record_id": record_id,
+        "message": "很抱歉這次的回答未能幫助您。如需進一步協助，請轉接總機 **0800-123-123**，將由專人為您服務。"
     }

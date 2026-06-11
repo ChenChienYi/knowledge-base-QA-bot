@@ -30,6 +30,13 @@
         .answer-content { font-size: 16px; line-height: 1.6; white-space: pre-line; }
         .loading { text-align: center; color: #666; font-style: italic; display: none; margin-top: 20px; }
         .rewrite-box { display:none; color: #666; font-size: 13px; margin-bottom: 15px; background: #e8f0fe; padding: 8px 12px; border-radius: 4px; border-left: 4px solid #1a73e8; }
+        .feedback-bar { display: none; margin-top: 16px; padding-top: 12px; border-top: 1px solid #eee; display: flex; align-items: center; gap: 10px; }
+        .feedback-bar span { font-size: 14px; color: #555; }
+        .btn-helpful { padding: 7px 16px; background: #34a853; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
+        .btn-helpful:hover { background: #2d9246; }
+        .btn-not-helpful { padding: 7px 16px; background: #ea4335; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
+        .btn-not-helpful:hover { background: #c5372c; }
+        .feedback-done { font-size: 14px; color: #888; }
     </style>
 </head>
 <body>
@@ -68,11 +75,45 @@
         <div id="answer-card" class="card">
             <h2>💬 AI 客服回答 (Answer)</h2>
             <div id="answer-container" class="answer-content"></div>
+            <div id="feedback-bar" class="feedback-bar" style="display:none;">
+                <span>這個回答有幫助嗎？</span>
+                <button class="btn-helpful" onclick="submitFeedback(true)">👍 有幫助</button>
+                <button class="btn-not-helpful" onclick="submitFeedback(false)">👎 沒幫助</button>
+            </div>
         </div>
     </div>
 
     <script>
         let conversationHistory = [];
+        let currentSessionId = crypto.randomUUID();   // 每次頁面載入產生新 session
+        let lastQueryData = null;                      // 暫存最後一次問答，供負評使用
+
+        async function submitFeedback(isHelpful) {
+            const bar = document.getElementById('feedback-bar');
+            if (isHelpful) {
+                bar.innerHTML = '<span class="feedback-done">✅ 感謝您的回饋！</span>';
+                return;
+            }
+            // 沒幫助：呼叫後端 API
+            bar.innerHTML = '<span class="feedback-done">⏳ 記錄中...</span>';
+            try {
+                const res = await fetch('/feedback/negative', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_id: currentSessionId,
+                        user_question: lastQueryData.question,
+                        llm_answer: lastQueryData.answer,
+                        retrieved_sources: lastQueryData.sources,
+                    })
+                });
+                const data = await res.json();
+                bar.innerHTML = `<span class="feedback-done">📋 已記錄。${data.message}</span>`;
+            } catch (e) {
+                bar.innerHTML = '<span class="feedback-done">⚠️ 記錄失敗，請稍後再試。</span>';
+            }
+        }
+
         async function sendQuery() {
             const inputEl = document.getElementById('query-input');
             const btnEl = document.getElementById('send-btn');
@@ -91,6 +132,7 @@
             sourcesCard.style.display = 'none';
             answerCard.style.display = 'none';
             document.getElementById('rewrite-display').style.display = 'none';
+            document.getElementById('feedback-bar').style.display = 'none';
             sourcesContainer.innerHTML = '';
             answerContainer.innerHTML = ''; 
 
@@ -148,11 +190,19 @@
                                     });
                                 }
                                 sourcesCard.style.display = 'block';
-                                answerCard.style.display = 'block'; 
+                                answerCard.style.display = 'block';
+                                window._lastSources = payload.sources || [];
 
                             } else if (currentEventName === 'token') {
-                                accumulatedAnswer += dataContent;
+                                // ✨ 修正：token 現在是 JSON 字串，需要解析
+                                try {
+                                    const token = JSON.parse(dataContent);
+                                    accumulatedAnswer += token;
+                                } catch {
+                                    accumulatedAnswer += dataContent;
+                                }
                                 answerContainer.innerText = accumulatedAnswer;
+                                answerCard.style.display = 'block';
 
                             } else if (currentEventName === 'done') {
                                 answerContainer.innerHTML = renderMarkdown(accumulatedAnswer);
@@ -160,6 +210,19 @@
                                 const finalAnswer = payload.full_answer || accumulatedAnswer;
                                 conversationHistory.push({ role: "user", content: query });
                                 conversationHistory.push({ role: "assistant", content: finalAnswer });
+                                // 暫存本次問答供負評使用，並顯示回饋按鈕
+                                lastQueryData = {
+                                    question: query,
+                                    answer: finalAnswer,
+                                    sources: window._lastSources || [],
+                                };
+                                const feedbackBar = document.getElementById('feedback-bar');
+                                feedbackBar.style.display = 'flex';
+                                feedbackBar.innerHTML = `
+                                    <span>這個回答有幫助嗎？</span>
+                                    <button class="btn-helpful" onclick="submitFeedback(true)">👍 有幫助</button>
+                                    <button class="btn-not-helpful" onclick="submitFeedback(false)">👎 沒幫助</button>
+                                `;
                             } else if (currentEventName === 'error') {
                                 alert('後端錯誤: ' + dataContent);
                             }

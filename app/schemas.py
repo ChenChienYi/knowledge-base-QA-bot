@@ -34,3 +34,10 @@ class ChatResponse(BaseModel):
 class StreamSourceResponse(BaseModel):
     sources: list[SourceInfo]
     rewritten_query: str
+
+# 🌟 新增：負評回報 API 的請求格式
+class NegativeFeedbackRequest(BaseModel):
+    session_id: str          # 對話 session 識別
+    user_question: str       # 使用者問題
+    llm_answer: str          # LLM 原始回答
+    retrieved_sources: list  # 檢索到的 top3 來源與分數

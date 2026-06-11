@@ -15,6 +15,9 @@ import os
 from openai import OpenAI
 from tqdm import tqdm # 建議安裝 tqdm 來看進度條: pip install tqdm
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # 1. 初始化 OpenAI
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
@@ -140,6 +143,10 @@ def save_as_markdown(faqs: list[dict], output_path: str):
         
         # 🌟 呼叫 LLM 生成這題的 Metadata
         meta_dict = generate_metadata_with_llm(faq['q'], faq['a'])
+        
+        # ✨ 新增：補上日期欄位（預設生效日，到期日為 None = 永久有效）
+        meta_dict["effective_date"] = "2024-01-01"
+        meta_dict["expiry_date"] = None
         
         # 🌟 將 Metadata 以 HTML 隱藏註解的方式寫入下一行
         lines.append(f"<!-- {json.dumps(meta_dict, ensure_ascii=False)} -->\n")
